@@ -16,15 +16,13 @@ def _csv_for_metrics(filepath, collected_metrics):
 
     metrics = list(collected_metrics[0].keys())
     with open(filepath, "w") as f:
-        csv_writer = csv.DictWriter(
-            f, fieldnames=metrics, delimiter=",", quotechar='"'
-        )
+        csv_writer = csv.DictWriter(f, fieldnames=metrics, delimiter=",", quotechar='"')
         csv_writer.writeheader()
         for row in collected_metrics:
             csv_writer.writerow(row)
 
-class Connection:
 
+class Connection:
     def __init__(self):
         self.to_parse = []
         self.to_bind = []
@@ -55,7 +53,7 @@ class Connection:
     def process_client_messages(self, packet):
         ts = packet.time
         for msg in packet["PostgresFrontend"].contents:
-            assert(self.with_client)
+            assert self.with_client
             if self.current_group_metrics:
                 self.current_group_metrics["client_bytes"] += len(msg)
             elif not self.current_group_metrics:
@@ -103,7 +101,7 @@ class Connection:
     def process_server_messages(self, packet):
         ts = packet.time
         for msg in packet["PostgresBackend"].contents:
-            assert(not self.with_client)
+            assert not self.with_client
             self.current_group_metrics["server_bytes"] += len(msg)
             if self.current_txn_metrics:
                 self.current_txn_metrics["server_bytes"] += len(msg)
@@ -128,7 +126,9 @@ class Connection:
                         self.current_txn_metrics["server_wait"] += (
                             packet.time - self.last_client_ts
                         )
-                        self.current_txn_metrics["statements"] = b";".join(self.current_txn_metrics["statements"]).decode()
+                        self.current_txn_metrics["statements"] = b";".join(
+                            self.current_txn_metrics["statements"]
+                        ).decode()
                         self.txn_metrics.append(self.current_txn_metrics)
                         self.current_txn_metrics = None
 
@@ -142,7 +142,9 @@ class Connection:
                 else:
                     self.last_server_ts = 0
                 self.with_client = True
-                self.current_group_metrics["statements"] = b";".join(self.current_group_metrics["statements"]).decode()
+                self.current_group_metrics["statements"] = b";".join(
+                    self.current_group_metrics["statements"]
+                ).decode()
                 self.group_metrics.append(self.current_group_metrics)
                 self.current_group_metrics = None
 
