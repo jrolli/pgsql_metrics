@@ -22,6 +22,37 @@ def _csv_for_metrics(filepath, collected_metrics):
             csv_writer.writerow(row)
 
 
+_conn_schema = {
+    "statements": [],
+    "client_bytes": 0,
+    "server_bytes": 0,
+    "client_wait": 0,
+    "server_wait": 0,
+    "parse_bytes": 0,
+    "parse_msgs": 0,
+    "parsecomplete_bytes": 0,
+    "parsecomplete_msgs": 0,
+    "bind_bytes": 0,
+    "bind_msgs": 0,
+    "bindcomplete_bytes": 0,
+    "bindcomplete_msgs": 0,
+    "execute_bytes": 0,
+    "execute_msgs": 0,
+    "commandcomplete_bytes": 0,
+    "commandcomplete_msgs": 0,
+    "describe_bytes": 0,
+    "describe_msgs": 0,
+    "rowdescription_bytes": 0,
+    "rowdescription_msgs": 0,
+    "datarow_bytes": 0,
+    "datarow_msgs": 0,
+    "sync_bytes": 0,
+    "sync_msgs": 0,
+    "readyforquery_bytes": 0,
+    "readyforquery_msgs": 0,
+}
+
+
 class Connection:
     def __init__(self):
         self.to_parse = []
@@ -50,46 +81,46 @@ class Connection:
     def get_txn_metrics(self, label=None):
         return self._get_metrics(self.txn_metrics, label)
 
+    def _bump_stats(self, msgtype, msg):
+        self.current_group_metrics[f"{msgtype.lower()}_bytes"] += len(msg)
+        self.current_group_metrics[f"{msgtype.lower()}_msgs"] += 1
+
+        if self.current_txn_metrics:
+            self.current_txn_metrics[f'{msgtype.lower()}_bytes'] += len(msg)
+            self.current_txn_metrics[f'{msgtype.lower()}_msgs'] += 1
+
+
     def process_client_messages(self, packet):
         ts = packet.time
         for msg in packet["PostgresFrontend"].contents:
             assert self.with_client
-            if self.current_group_metrics:
-                self.current_group_metrics["client_bytes"] += len(msg)
-            elif not self.current_group_metrics:
-                self.current_group_metrics = {
-                    "statements": [],
-                    "client_bytes": len(msg),
-                    "server_bytes": 0,
-                    "client_wait": 0,
-                    "server_wait": 0,
-                }
+            if not self.current_group_metrics:
+                self.current_group_metrics = copy.deepcopy(_conn_schema)
 
-            if self.current_txn_metrics:
-                self.current_txn_metrics["client_bytes"] += len(msg)
+            self.current_group_metrics["client_bytes"] += len(msg)
 
+            msgtype = None
             if "Parse" in msg:
                 p = msg["Parse"]
+                msgtype = "Parse"
                 self.to_parse.append((ts, p.destination, p.query))
 
                 if p.query.upper() == b"BEGIN":
-                    self.current_txn_metrics = {
-                        "statements": [],
-                        "client_bytes": len(msg),
-                        "server_bytes": 0,
-                        "client_wait": 0,
-                        "server_wait": 0,
-                    }
+                    self.current_txn_metrics = copy.deepcopy(_conn_schema)
             elif "Bind" in msg:
                 p = msg["Bind"]
+                msgtype = "Bind"
                 self.to_bind.append((ts, p.destination, p.statement))
             elif "Describe" in msg:
                 p = msg["Describe"]
+                msgtype = "Describe"
                 self.to_describe.append((ts, p.close_type, p.statement))
             elif "Execute" in msg:
                 p = msg["Execute"]
+                msgtype = "Execute"
                 self.to_execute.append((ts, p.portal))
             elif "Sync" in msg:
+                msgtype = "Sync"
                 assert self.with_client
                 if self.last_server_ts != 0 and self.current_txn_metrics:
                     self.current_txn_metrics["client_wait"] += (
@@ -98,6 +129,14 @@ class Connection:
                 self.last_client_ts = packet.time
                 self.with_client = False
 
+            # Handle transaction stats after processing the message in case there was a BEGIN
+            if self.current_txn_metrics:
+                self.current_txn_metrics["client_bytes"] += len(msg)
+            if msgtype:
+                self._bump_stats(msgtype, msg)
+            else:
+                print("WARNING:  encountered unexpected message type...")
+
     def process_server_messages(self, packet):
         ts = packet.time
         for msg in packet["PostgresBackend"].contents:
@@ -105,18 +144,22 @@ class Connection:
             self.current_group_metrics["server_bytes"] += len(msg)
             if self.current_txn_metrics:
                 self.current_txn_metrics["server_bytes"] += len(msg)
+
             if "ParseComplete" in msg:
+                self._bump_stats("ParseComplete", msg)
                 query, self.to_parse = self.to_parse[0], self.to_parse[1:]
                 self.statements[query[1]] = query[2]
             elif "BindComplete" in msg:
+                self._bump_stats("BindComplete", msg)
                 statement, self.to_bind = self.to_bind[0], self.to_bind[1:]
                 self.portals[statement[1]] = self.statements[statement[2]]
             elif "RowDescription" in msg:
+                self._bump_stats("RowDescription", msg)
                 describe, self.to_describe = self.to_describe[0], self.to_describe[1:]
             elif "DataRow" in msg:
-                # Returned data
-                pass
+                self._bump_stats("DataRow", msg)
             elif "CommandComplete" in msg:
+                self._bump_stats("CommandComplete", msg)
                 portal, self.to_execute = self.to_execute[0], self.to_execute[1:]
                 query = self.portals[portal[1]]
                 self.current_group_metrics["statements"].append(query)
@@ -134,6 +177,7 @@ class Connection:
 
             elif "ReadyForQuery" in msg:
                 assert not self.with_client
+                self._bump_stats("ReadyForQuery", msg)
                 self.current_group_metrics["server_wait"] += (
                     packet.time - self.last_client_ts
                 )
